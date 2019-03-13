@@ -8,12 +8,10 @@ import (
 	"net/http/cookiejar"
 	"net/url"
 	"regexp"
-	"strings"
 
 	"golang.org/x/net/publicsuffix"
 	"github.com/PuerkitoBio/goquery"
 	"github.com/gregdel/pushover"
-	//"github.com/davecgh/go-spew/spew"
 )
 
 var doomsday = time.Date(2018, time.December, 14, 16, 0, 1, 0, mustLoadLocation("America/Chicago"))
@@ -53,21 +51,34 @@ func main() {
 	notif = pushover.New(*key)
 	recipient = pushover.NewRecipient(*rcp)
 
-	nextTime := doomsday.Add(-24 * time.Hour)
-	for !decisionReleased {
-		str := fmt.Sprintf("%.1fh remaining until decision.\n", doomsday.Sub(nextTime).Hours())
+	interval := int64(1)
+	unit := time.Hour
+	for {
+		if check() {
+			break
+		}
+
+		str := fmt.Sprintf("%s remaining until decision.\n", doomsday.Sub(time.Now()).String())
 		fmt.Println(str)
 
 		msg := pushover.NewMessageWithTitle(str, "You lose!")
 		notif.SendMessage(msg, recipient)
 
-		time.Sleep(time.Until(nextTime))
-		check()
+		wakeupTime := time.Now().Truncate(unit).Add(unit*time.Duration(interval))
+		fmt.Printf("Next wakeup: %s\n", wakeupTime.String())
+		time.Sleep(time.Until(wakeupTime))
 
-		if time.Now().Before(doomsday) {
-			nextTime = time.Now().Add(time.Hour).Truncate(time.Hour)
-		} else {
-			nextTime = time.Now().Add(5 * time.Minute).Truncate(time.Minute)
+		r := doomsday.Sub(time.Now())
+		switch {
+		case r < 1 * time.Hour: // 1 hour remaining: 15 minute interval
+			interval = 15
+			unit = time.Minute
+		case (1 * time.Hour) < r && r < (2 * time.Hour): // ~2 hours remaining: 30 minute interval
+			interval = 30
+			unit = time.Minute
+		default: // any other time: 1 hour interval
+			interval = 1
+			unit = time.Hour
 		}
 	}
 
@@ -78,7 +89,7 @@ func main() {
 	} else {
 		timely = "early"
 	}
-	fmt.Printf("Final time: %s\n %s", diff.String(), timely)
+	fmt.Printf("Decision released, exiting. Final time: %s (%s)\n", diff.String(), timely)
 }
 
 var (
@@ -95,10 +106,10 @@ var (
 	baseUrl = "https://myillini.illinois.edu"
 	loginPage = baseUrl + "/IdentityManagement/Home/Login"
 	statusPage = baseUrl + "/Apply/Application/Status"
-	statusMatch = regexp.MustCompile("admission decision: ([a-z]+)") // https://talk.collegeconfidential.com/university-illinois-urbana-champaign/1496755-the-worst-rejection-ever.html
+	statusMatch = regexp.MustCompile("(?i)decision:\\s+([a-z]+)")
 )
 
-func check() {
+func check() (ok bool) {
 	defer func() {
 		if r := recover(); r != nil {
 			fmt.Printf("Error occurred while checking status: %s\n", r)
@@ -109,10 +120,10 @@ func check() {
 	var (
 		r *http.Response
 		retries = 3
-		interval = 5 * time.Second
+		interval = 5 * time.Second // don't hammer the endpoint
 	)
 	loop:
-	for retries >= 0 {
+	for {
 		switch r = request(statusPage); r.StatusCode {
 		case 302:
 			if retries < 1 {
@@ -124,26 +135,28 @@ func check() {
 			fmt.Println("Login OK!")
 			break loop
 		default:
-			panic(fmt.Sprintf("unhandled status code %d", r.StatusCode))
+			panic(fmt.Sprintf("unhandled status code %d (server bad?)", r.StatusCode))
 		}
 
-		fmt.Printf("Login failed. %d attempts remaining...\n", retries-1)
-		time.Sleep(interval)
 		retries--
+		fmt.Printf("Trying to login, %d attempts remaining...\n", retries)
+		time.Sleep(interval)
 	}
 
 	doc, err := goquery.NewDocumentFromResponse(r)
 	if err != nil {
 		panic(err)
 	}
-	status := strings.ToLower(doc.Find("div #statusArea").Text())
+	status := doc.Find("div #statusArea").Text()
 	matches := statusMatch.FindStringSubmatch(status)
+
+	fmt.Printf("Result:\n%s\n", status)
 	if len(matches) < 2 {
 		return
 	}
 
 	// decisions released!
-	decisionReleased = true
+	ok = true
 	result := matches[1]
 	fmt.Printf("result: %s\n", result)
 
@@ -162,6 +175,8 @@ func check() {
 	if err != nil {
 		fmt.Printf("Failed to push to device: %s\n", err)
 	}
+
+	return
 }
 
 func login() {
